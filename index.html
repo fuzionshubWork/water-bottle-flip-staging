@@ -41,6 +41,18 @@
         width: 180px; height: 180px; margin: 0 auto 12px;
         background: url('TemplateData/game-icon.png') center / contain no-repeat;
       }
+      /* Shown only while we decide WHICH icon to display, so the player never sees the built-in
+         icon flash and then get replaced by the admin one. Positioned ABSOLUTELY, over the logo
+         box: in normal flow, removing it would reflow the column and make the icon jump. */
+      #unity-logo-spinner {
+        position: absolute; left: 50%; top: 90px;
+        width: 34px; height: 34px; margin: -17px 0 0 -17px;
+        border: 4px solid rgba(255,255,255,0.18);
+        border-top-color: rgba(255,255,255,0.85);
+        border-radius: 50%;
+        animation: gb-spin 0.9s linear infinite;
+      }
+      @keyframes gb-spin { to { transform: rotate(360deg); } }
       #unity-progress-bar-empty {                 /* track */
         width: 300px; height: 18px; margin: 12px auto 0;
         background: #d9d9d9 !important; background-image: none !important;
@@ -69,11 +81,91 @@
       <canvas id="unity-canvas" width=1080 height=1920 tabindex="-1"></canvas>
       <div id="unity-loading-bar">
         <div id="unity-logo"></div>
+        <div id="unity-logo-spinner"></div>
         <div id="unity-progress-bar-empty"><div id="unity-progress-bar-full"></div></div>
         <div id="unity-progress-percent">0%</div>
       </div>
       <div id="unity-warning"> </div>
     </div>
+    <script>
+      // ===== Admin loading icon (customization.gameLogoUrl) =====
+      // The loading screen renders BEFORE the engine starts, so C# cannot touch it — this has to
+      // live here. Set per game from the GameBull ADMIN panel; no rebuild or redeploy needed,
+      // because the icon is looked up on every page load.
+      //
+      // Reads PER-GAME fields only: gameLogoUrl, then gameBannerUrl. It deliberately ignores
+      // logoUrl, tenantLogoUrl and assets[] — those are TENANT-WIDE, and on a shared tenant they
+      // return whichever image some other game uploaded, so using them would show the wrong
+      // game's logo here.
+      (function applyAdminLoadingIcon() {
+        var REVEAL_DEADLINE_MS = 4000;
+        var revealed = false;
+
+        function killSpinner() {
+          var sp = document.querySelector("#unity-logo-spinner");
+          if (sp && sp.parentNode) sp.parentNode.removeChild(sp);
+        }
+
+        // Exactly ONE icon is ever shown — never the built-in one followed by the admin one.
+        function reveal(iconUrl) {
+          if (revealed) return;
+          revealed = true;
+          var el = document.querySelector("#unity-logo");
+          if (el) {
+            if (iconUrl) el.style.backgroundImage = 'url("' + iconUrl.replace(/"/g, "%22") + '")';
+            el.style.visibility = "visible";
+          }
+          killSpinner();
+        }
+
+        try {
+          // Hidden from JS, NOT from CSS: if this script never runs at all, the built-in icon
+          // must still appear.
+          var logo = document.querySelector("#unity-logo");
+          if (logo) logo.style.visibility = "hidden";
+
+          // Hard deadline — the icon is revealed even if the API never answers.
+          setTimeout(function () { reveal(null); }, REVEAL_DEADLINE_MS);
+
+          var q          = new URLSearchParams(window.location.search);
+          var tenantSlug = q.get("tenantSlug");
+          var token      = q.get("sessionToken") || q.get("bootToken") || q.get("token");
+          var gameId     = q.get("gameId");
+
+          // Default must match the environment this build was made for. Kept in sync with the C#
+          // GAMEBULL_PRODUCTION define by Tools > GameBull > Environment.
+          var apiBase    = q.get("apiBase") || "https://api.staging.g-b.store"; /* GAMEBULL_API_BASE */
+
+          // gameId is read from the URL and NEVER hardcoded: a wrong id is still a VALID id for a
+          // different game, so a hardcoded fallback would silently show another game's logo.
+          // Missing anything -> skip the request entirely. No error, no delay.
+          if (!tenantSlug || !token || !gameId) { reveal(null); return; }
+
+          var ctl = new AbortController();
+          setTimeout(function () { ctl.abort(); }, REVEAL_DEADLINE_MS);
+
+          fetch(apiBase.replace(/\/+$/, "") + "/play/games/" + encodeURIComponent(gameId)
+                  + "/context?tenantSlug=" + encodeURIComponent(tenantSlug),
+                { headers: { "Authorization": "Bearer " + token }, signal: ctl.signal })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+              var c = (data && data.customization) || {};
+              var iconUrl = (typeof c.gameLogoUrl   === "string" && c.gameLogoUrl)   ? c.gameLogoUrl   :
+                            (typeof c.gameBannerUrl === "string" && c.gameBannerUrl) ? c.gameBannerUrl : null;
+              if (!iconUrl) { reveal(null); return; }
+
+              // Preload and reveal only once decoded, so a slow or broken image never flashes
+              // or appears half-drawn.
+              var img = new Image();
+              img.onload  = function () { reveal(iconUrl); };
+              img.onerror = function () { reveal(null); };
+              img.src = iconUrl;
+            })
+            .catch(function () { reveal(null); });
+        } catch (e) { reveal(null); }
+      })();
+    </script>
+
     <script>
       var canvas = document.querySelector("#unity-canvas");
 
@@ -156,6 +248,7 @@
             if (el.parentNode) el.parentNode.removeChild(el);
           }
           killEl("#unity-logo");
+          killEl("#unity-logo-spinner");   // or it lingers, spinning, over the running game
           killEl("#unity-progress-bar-full");
           killEl("#unity-progress-bar-empty");
           killEl("#unity-progress-percent");
